@@ -73,6 +73,23 @@ class TRTLLMProtocol:
     # is not needed.
     publish_events_and_metrics: bool = False
 
+    # Bind each worker rank to its own NUMA locality domain via
+    # srun --cpu-bind=rank_ldom. None (default) preserves the historical unbound
+    # behavior; True enables per-rank binding; False forces it off.
+    #
+    # On hosts with many NUMA domains this dominates. Measured on b300
+    # (AMD EPYC 9575F, 8 NUMA domains, 8 gen ranks/node) with GLM-5.2 NVFP4
+    # disaggregated decode, binding as the only variable:
+    #     unbound          decode p50 70.4 ms
+    #     rank_ldom bound  decode p50 14.1 ms   (5.0x; aggregated is 14.0 ms)
+    # The cost is host-side input prep (prepare_for_spec_decode) contending
+    # across NUMA domains when ranks may migrate; the unbound tail is also
+    # skewed, which presents as a rotating straggler.
+    #
+    # Requires the whole node (srun rejects rank_ldom with "Entire node must be
+    # allocated"), so pair with use_exclusive_sbatch_directive.
+    numa_cpu_bind: bool | None = None
+
     Schema: ClassVar[builtins.type[Schema]] = Schema
 
     # =========================================================================
@@ -83,11 +100,14 @@ class TRTLLMProtocol:
         """TRTLLM uses MPI-style launching (one srun per endpoint with all nodes)."""
         from srtctl.backends.base import SrunConfig
 
+        # rank_ldom binds task i to NUMA locality domain i.
+        cpu_bind = "verbose,rank_ldom" if self.numa_cpu_bind else "verbose,none"
+
         return SrunConfig(
             mpi="pmix",
             oversubscribe=True,
             launch_per_endpoint=True,
-            cpu_bind="verbose,none",
+            cpu_bind=cpu_bind,
         )
 
     def get_config_for_mode(self, mode: WorkerMode) -> dict[str, Any]:
